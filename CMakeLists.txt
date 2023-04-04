@@ -1,304 +1,448 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.0.2)
 
-# determine whether this is a standalone project or included by other projects
-set (MINIZ_STANDALONE_PROJECT ON)
-if(DEFINED PROJECT_NAME)
-  set(MINIZ_STANDALONE_PROJECT OFF)
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+if (${CMAKE_VERSION} VERSION_LESS "3.17.0")
+  list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake-compat)
 endif()
 
-if(CMAKE_MINOR_VERSION LESS 12)
-  project(miniz)
-  # see issue https://gitlab.kitware.com/cmake/cmake/merge_requests/1799
+project(libzip
+  VERSION 1.9.2
+  LANGUAGES C)
+
+option(ENABLE_COMMONCRYPTO "Enable use of CommonCrypto" ON)
+option(ENABLE_GNUTLS "Enable use of GnuTLS" ON)
+option(ENABLE_MBEDTLS "Enable use of mbed TLS" ON)
+option(ENABLE_OPENSSL "Enable use of OpenSSL" ON)
+option(ENABLE_WINDOWS_CRYPTO "Enable use of Windows cryptography libraries" ON)
+
+option(ENABLE_BZIP2 "Enable use of BZip2" ON)
+option(ENABLE_LZMA "Enable use of LZMA" ON)
+option(ENABLE_ZSTD "Enable use of Zstandard" ON)
+
+option(BUILD_TOOLS "Build tools in the src directory (zipcmp, zipmerge, ziptool)" ON)
+option(BUILD_REGRESS "Build regression tests" ON)
+option(BUILD_EXAMPLES "Build examples" ON)
+option(BUILD_DOC "Build documentation" ON)
+
+include(CheckFunctionExists)
+include(CheckIncludeFiles)
+include(CheckLibraryExists)
+include(CheckSymbolExists)
+include(CheckTypeSize)
+include(CheckCSourceRuns)
+include(CheckCSourceCompiles)
+include(CheckStructHasMember)
+include(TestBigEndian)
+include(GNUInstallDirs)
+
+if(ENABLE_COMMONCRYPTO)
+  check_include_files(CommonCrypto/CommonCrypto.h COMMONCRYPTO_FOUND)
+endif()
+if(ENABLE_GNUTLS)
+  find_package(Nettle 3.0)
+  find_package(GnuTLS)
+endif()
+if(ENABLE_MBEDTLS)
+  find_package(MbedTLS 1.0)
+endif()
+if(ENABLE_OPENSSL)
+  find_package(OpenSSL)
+endif()
+if(WIN32)
+  if(ENABLE_WINDOWS_CRYPTO)
+    set(WINDOWS_CRYPTO_FOUND TRUE)
+  endif()
+endif()
+
+option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+option(LIBZIP_DO_INSTALL "Install libzip and the related files" ON)
+
+option(SHARED_LIB_VERSIONNING "Add SO version in .so build" ON)
+
+find_program(MDOCTOOL NAMES mandoc groff)
+if (MDOCTOOL)
+  set(DOCUMENTATION_FORMAT "mdoc" CACHE STRING "Documentation format")
 else()
-  project(miniz C)
-  set(CMAKE_C_STANDARD 90)
-  set(CMAKE_VERBOSE_MAKEFILE ON)
-  # set(CMAKE_C_VISIBILITY_PRESET hidden)
-  # set(CMAKE_VISIBILITY_INLINES_HIDDEN YES)
-
-  if (MSVC)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /W3 /Zi /permissive-")
-  else ()
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wshadow -Wformat=2 -Wall -Wno-overlength-strings -pedantic")
-  endif ()
-endif()
-
-set(MINIZ_API_VERSION 3)
-set(MINIZ_MINOR_VERSION 0)
-set(MINIZ_PATCH_VERSION 2)
-set(MINIZ_VERSION 
-    ${MINIZ_API_VERSION}.${MINIZ_MINOR_VERSION}.${MINIZ_PATCH_VERSION})
-
-if(CMAKE_BUILD_TYPE STREQUAL "")
-  # CMake defaults to leaving CMAKE_BUILD_TYPE empty. This screws up
-  # differentiation between debug and release builds.
-  set(CMAKE_BUILD_TYPE "Release" CACHE STRING
-    "Choose the type of build, options are: None (CMAKE_CXX_FLAGS or \
-CMAKE_C_FLAGS used) Debug Release RelWithDebInfo MinSizeRel." FORCE)
-endif ()
-
-option(BUILD_EXAMPLES "Build examples" ${MINIZ_STANDALONE_PROJECT})
-option(BUILD_FUZZERS "Build fuzz targets" OFF)
-option(AMALGAMATE_SOURCES "Amalgamate sources into miniz.h/c" OFF)
-option(BUILD_HEADER_ONLY "Build a header-only version" OFF)
-option(BUILD_SHARED_LIBS "Build shared library instead of static" OFF)
-option(INSTALL_PROJECT "Install project" ${MINIZ_STANDALONE_PROJECT})
-
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin)
-
-if(INSTALL_PROJECT)
-  include(GNUInstallDirs)
-endif()
-
-if(BUILD_HEADER_ONLY)
-  set(AMALGAMATE_SOURCES ON CACHE BOOL "Build a header-only version" FORCE)
-endif(BUILD_HEADER_ONLY)
-
-if(AMALGAMATE_SOURCES)
-  # Amalgamate
-  file(COPY miniz.h DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/)
-  file(READ miniz.h MINIZ_H)
-  file(READ miniz_common.h MINIZ_COMMON_H)
-  file(READ miniz_tdef.h MINIZ_TDEF_H)
-  file(READ miniz_tinfl.h MINIZ_TINFL_H)
-  file(READ miniz_zip.h MINIZ_ZIP_H)
-  file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/miniz.h
-     "${MINIZ_COMMON_H} ${MINIZ_TDEF_H} ${MINIZ_TINFL_H} ${MINIZ_ZIP_H}")
-
-  file(COPY miniz.c DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/)
-  file(READ miniz_tdef.c MINIZ_TDEF_C)
-  file(READ miniz_tinfl.c MINIZ_TINFL_C)
-  file(READ miniz_zip.c MINIZ_ZIP_C)
-  file(APPEND ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/miniz.c
-     "${MINIZ_TDEF_C} ${MINIZ_TINFL_C} ${MINIZ_ZIP_C}")
-
-  file(READ ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/miniz.h AMAL_MINIZ_H)
-  file(READ ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/miniz.c AMAL_MINIZ_C)
-  foreach(REPLACE_STRING miniz;miniz_common;miniz_tdef;miniz_tinfl;miniz_zip;miniz_export)
-    string(REPLACE "#include \"${REPLACE_STRING}.h\"" "" AMAL_MINIZ_H "${AMAL_MINIZ_H}")
-    string(REPLACE "#include \"${REPLACE_STRING}.h\"" "" AMAL_MINIZ_C "${AMAL_MINIZ_C}")
-  endforeach()
-  string(CONCAT AMAL_MINIZ_H "#ifndef MINIZ_EXPORT\n#define MINIZ_EXPORT\n#endif\n" "${AMAL_MINIZ_H}")
-  if(BUILD_HEADER_ONLY)
-    string(CONCAT AMAL_MINIZ_H "${AMAL_MINIZ_H}" "\n#ifndef MINIZ_HEADER_FILE_ONLY\n"
-             "${AMAL_MINIZ_C}" "\n#endif // MINIZ_HEADER_FILE_ONLY\n")
-    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/miniz.h "${AMAL_MINIZ_H}")
-    add_library(${PROJECT_NAME} INTERFACE)
-    
-    # Might not be a good idea to force this on the library user
-    # as it could bloat the global namespace
-    # https://github.com/libevent/libevent/issues/460
-    # target_compile_definitions(${PROJECT_NAME} 
-    #     INTERFACE $<$<C_COMPILER_ID:GNU>:_GNU_SOURCE>)
-    
-    set_property(TARGET ${PROJECT_NAME} APPEND 
-      PROPERTY INTERFACE_INCLUDE_DIRECTORIES
-      $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/amalgamation>
-      $<INSTALL_INTERFACE:include>
-    )
-  else(BUILD_HEADER_ONLY)
-    string(CONCAT AMAL_MINIZ_C "#include \"miniz.h\"\n" "${AMAL_MINIZ_C}")
-    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/miniz.h "${AMAL_MINIZ_H}")
-    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/miniz.c "${AMAL_MINIZ_C}")
-    set(miniz_SOURCE ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/miniz.h
-                     ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/miniz.c)
-    add_library(${PROJECT_NAME} STATIC ${miniz_SOURCE})
-    target_include_directories(${PROJECT_NAME} PUBLIC
-      $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/amalgamation>
-      $<INSTALL_INTERFACE:include>
-    )
-  endif(BUILD_HEADER_ONLY)
-
-  set(INSTALL_HEADERS ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/miniz.h)
-  
-  file(GLOB_RECURSE ZIP_FILES RELATIVE "${CMAKE_CURRENT_BINARY_DIR}/amalgamation" "${CMAKE_CURRENT_BINARY_DIR}/amalgamation/*")
-  file(GLOB_RECURSE ZIP_FILES2 RELATIVE "${CMAKE_SOURCE_DIR}" "${CMAKE_SOURCE_DIR}/examples/*")
-  list(APPEND ZIP_FILES ${ZIP_FILES2})
-  list(APPEND ZIP_FILES "ChangeLog.md")
-  list(APPEND ZIP_FILES "readme.md")
-  list(APPEND ZIP_FILES "LICENSE")
-  set(ZIP_OUT_FN "${CMAKE_CURRENT_BINARY_DIR}/miniz-${MINIZ_VERSION}.zip")
-  message(STATUS "Zip files: ${ZIP_FILES}")
-  add_custom_command(
-		COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/examples ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/examples
-		COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/ChangeLog.md ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/ChangeLog.md
-		COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/readme.md ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/readme.md
-		COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/LICENSE ${CMAKE_CURRENT_BINARY_DIR}/amalgamation/LICENSE
-		COMMAND ${CMAKE_COMMAND} -E tar "cf" "${ZIP_OUT_FN}" --format=zip -- ${ZIP_FILES}
-        WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/amalgamation"
-        OUTPUT  "${ZIP_OUT_FN}"
-        DEPENDS ${ZIP_FILES}
-        COMMENT "Zipping to ${CMAKE_CURRENT_BINARY_DIR}/miniz.zip."
-    )
-	
-	add_custom_target(
-	  create_zip ALL
-	  DEPENDS "${ZIP_OUT_FN}"
-	)
-else(AMALGAMATE_SOURCES)
-  include(GenerateExportHeader)
-  set(miniz_SOURCE miniz.c miniz_zip.c miniz_tinfl.c miniz_tdef.c)
-  add_library(${PROJECT_NAME} ${miniz_SOURCE})
-  generate_export_header(${PROJECT_NAME})
-
-  if(NOT BUILD_SHARED_LIBS)
-    string(TOUPPER ${PROJECT_NAME} PROJECT_UPPER)
-    set_target_properties(${PROJECT_NAME}
-        PROPERTIES INTERFACE_COMPILE_DEFINITIONS ${PROJECT_UPPER}_STATIC_DEFINE)
+  find_program(MANTOOL NAMES nroff)
+  if (MANTOOL)
+    set(DOCUMENTATION_FORMAT "man" CACHE STRING "Documentation format")
   else()
-    set_property(TARGET ${PROJECT_NAME} PROPERTY C_VISIBILITY_PRESET hidden)
-  endif()
-
-  set_property(TARGET ${PROJECT_NAME} PROPERTY VERSION ${MINIZ_VERSION})
-  set_property(TARGET ${PROJECT_NAME} PROPERTY SOVERSION ${MINIZ_API_VERSION})
-  
-  target_include_directories(${PROJECT_NAME} PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-    $<INSTALL_INTERFACE:include>
-  )
-  
-  file(GLOB INSTALL_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/*.h)
-  list(APPEND
-       INSTALL_HEADERS ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}_export.h)
-endif(AMALGAMATE_SOURCES)
-
-if(NOT BUILD_HEADER_ONLY)
-  target_compile_definitions(${PROJECT_NAME} 
-    PRIVATE $<$<C_COMPILER_ID:GNU>:_GNU_SOURCE>)
-
-  # pkg-config file
-  configure_file(miniz.pc.in ${CMAKE_CURRENT_BINARY_DIR}/miniz.pc @ONLY)
-
-  if(INSTALL_PROJECT)
-    install(FILES
-      ${CMAKE_CURRENT_BINARY_DIR}/miniz.pc
-      DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+    set(DOCUMENTATION_FORMAT "html" CACHE STRING "Documentation format")
   endif()
 endif()
 
-set_property(TARGET ${PROJECT_NAME} PROPERTY
-  INTERFACE_${PROJECT_NAME}_MAJOR_VERSION ${MINIZ_API_VERSION})
-set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY
-  COMPATIBLE_INTERFACE_STRING ${PROJECT_NAME}_MAJOR_VERSION
-)
+include(Dist)
+Dist(${CMAKE_PROJECT_NAME}-${CMAKE_PROJECT_VERSION})
 
-if(INSTALL_PROJECT)
-  install(TARGETS ${PROJECT_NAME} EXPORT ${PROJECT_NAME}Targets
-    RUNTIME  DESTINATION ${CMAKE_INSTALL_BINDIR}
-    ARCHIVE  DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    LIBRARY  DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    # users can use <miniz.h> or <miniz/miniz.h>
-    INCLUDES DESTINATION include ${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME}
-  )
+#ADD_CUSTOM_TARGET(uninstall
+#  COMMAND cat ${PROJECT_BINARY_DIR}/install_manifest.txt | xargs rm
+#  WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+#  )
 
-  include(CMakePackageConfigHelpers)
-  write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}/${PROJECT_NAME}ConfigVersion.cmake"
-    VERSION ${MINIZ_VERSION}
-    COMPATIBILITY AnyNewerVersion
-  )
+if(BUILD_SHARED_LIBS)
+  set(HAVE_SHARED TRUE)
+else()
+  set(ZIP_STATIC TRUE)
+endif()
 
-  export(EXPORT ${PROJECT_NAME}Targets
-    FILE "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}/${PROJECT_NAME}Targets.cmake"
-    NAMESPACE ${PROJECT_NAME}::
-  )
-  configure_file(Config.cmake.in
-    "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}/${PROJECT_NAME}Config.cmake"
-    @ONLY
-  )
+# Checks
 
-  set(ConfigPackageLocation ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME})
-  install(EXPORT ${PROJECT_NAME}Targets
-    FILE
-      ${PROJECT_NAME}Targets.cmake
-    NAMESPACE
-      ${PROJECT_NAME}::
-    DESTINATION
-      ${ConfigPackageLocation}
-  )
-  install(
-    FILES
-      "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}/${PROJECT_NAME}Config.cmake"
-      "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}/${PROJECT_NAME}ConfigVersion.cmake"
-    DESTINATION
-      ${ConfigPackageLocation}
-    COMPONENT
-      Devel
-  )
+check_function_exists(_close HAVE__CLOSE)
+check_function_exists(_dup HAVE__DUP)
+check_function_exists(_fdopen HAVE__FDOPEN)
+check_function_exists(_fileno HAVE__FILENO)
+check_function_exists(_setmode HAVE__SETMODE)
+check_symbol_exists(_snprintf stdio.h HAVE__SNPRINTF)
+check_function_exists(_strdup HAVE__STRDUP)
+check_symbol_exists(_stricmp string.h HAVE__STRICMP)
+check_function_exists(_strtoi64 HAVE__STRTOI64)
+check_function_exists(_strtoui64 HAVE__STRTOUI64)
+check_function_exists(_unlink HAVE__UNLINK)
+check_function_exists(arc4random HAVE_ARC4RANDOM)
+check_function_exists(clonefile HAVE_CLONEFILE)
+check_function_exists(explicit_bzero HAVE_EXPLICIT_BZERO)
+check_function_exists(explicit_memset HAVE_EXPLICIT_MEMSET)
+check_function_exists(fchmod HAVE_FCHMOD)
+check_function_exists(fileno HAVE_FILENO)
+check_function_exists(fseeko HAVE_FSEEKO)
+check_function_exists(ftello HAVE_FTELLO)
+check_function_exists(getprogname HAVE_GETPROGNAME)
+check_function_exists(localtime_r HAVE_LOCALTIME_R)
+check_function_exists(setmode HAVE_SETMODE)
+check_symbol_exists(snprintf stdio.h HAVE_SNPRINTF)
+check_symbol_exists(strcasecmp strings.h HAVE_STRCASECMP)
+check_function_exists(strdup HAVE_STRDUP)
+check_function_exists(stricmp HAVE_STRICMP)
+check_function_exists(strtoll HAVE_STRTOLL)
+check_function_exists(strtoull HAVE_STRTOULL)
+
+check_include_files("sys/types.h;sys/stat.h;fts.h" HAVE_FTS_H)
+# fts functions may be in external library
+if(HAVE_FTS_H)
+  check_function_exists(fts_open HAVE_FTS_OPEN)
+  if(NOT HAVE_FTS_OPEN)
+    check_library_exists(fts fts_open "" HAVE_LIB_FTS)
+  else(NOT HAVE_FTS_OPEN)
+    set(HAVE_LIB_FTS "" CACHE INTERNAL "")
+  endif(NOT HAVE_FTS_OPEN)
+else(HAVE_FTS_H)
+  set(HAVE_LIB_FTS "" CACHE INTERNAL "")
+endif(HAVE_FTS_H)
+
+if(HAVE_LIB_FTS)
+  set(FTS_LIB fts CACHE INTERNAL "")
+else()
+  set(FTS_LIB "" CACHE INTERNAL "")
+endif()
+
+check_include_files(stdbool.h HAVE_STDBOOL_H)
+check_include_files(strings.h HAVE_STRINGS_H)
+check_include_files(unistd.h HAVE_UNISTD_H)
+
+check_include_files(inttypes.h HAVE_INTTYPES_H_LIBZIP)
+check_include_files(stdint.h HAVE_STDINT_H_LIBZIP)
+check_include_files(sys/types.h HAVE_SYS_TYPES_H_LIBZIP)
+
+# TODO: fix test
+# this test does not find __progname even when it exists
+#check_symbol_exists(__progname stdlib.h HAVE___PROGNAME)
+
+check_type_size(__int8 __INT8_LIBZIP)
+check_type_size(int8_t INT8_T_LIBZIP)
+check_type_size(uint8_t UINT8_T_LIBZIP)
+check_type_size(__int16 __INT16_LIBZIP)
+check_type_size(int16_t INT16_T_LIBZIP)
+check_type_size(uint16_t UINT16_T_LIBZIP)
+check_type_size(__int32 __INT32_LIBZIP)
+check_type_size(int32_t INT32_T_LIBZIP)
+check_type_size(uint32_t UINT32_T_LIBZIP)
+check_type_size(__int64 __INT64_LIBZIP)
+check_type_size(int64_t INT64_T_LIBZIP)
+check_type_size(uint64_t UINT64_T_LIBZIP)
+check_type_size("short" SHORT_LIBZIP)
+check_type_size("int" INT_LIBZIP)
+check_type_size("long" LONG_LIBZIP)
+check_type_size("long long" LONG_LONG_LIBZIP)
+check_type_size("off_t" SIZEOF_OFF_T)
+check_type_size("size_t" SIZEOF_SIZE_T)
+
+check_c_source_compiles("#include <sys/ioctl.h>
+#include <linux/fs.h>
+int main(int argc, char *argv[]) { unsigned long x = FICLONERANGE; }" HAVE_FICLONERANGE)
+
+check_c_source_compiles("
+int foo(char * _Nullable bar);
+int main(int argc, char *argv[]) { }" HAVE_NULLABLE)
+
+test_big_endian(WORDS_BIGENDIAN)
+
+find_package(ZLIB 1.1.2 REQUIRED)
+
+if(ENABLE_BZIP2)
+  find_package(BZip2)
+  if(BZIP2_FOUND)
+    set(HAVE_LIBBZ2 1)
+  else()
+    message(WARNING "-- bzip2 library not found; bzip2 support disabled")
+  endif(BZIP2_FOUND)
+endif(ENABLE_BZIP2)
+
+if(ENABLE_LZMA)
+  find_package(LibLZMA 5.2)
+  if(LIBLZMA_FOUND)
+    set(HAVE_LIBLZMA 1)
+  else()
+    message(WARNING "-- lzma library not found; lzma/xz support disabled")
+  endif(LIBLZMA_FOUND)
+endif(ENABLE_LZMA)
+
+if(ENABLE_ZSTD)
+  find_package(Zstd 1.3.6)
+  if(Zstd_FOUND)
+    set(HAVE_LIBZSTD 1)
+  else()
+    message(WARNING "-- zstd library not found; zstandard support disabled")
+  endif(Zstd_FOUND)
+endif(ENABLE_ZSTD)
+
+if (COMMONCRYPTO_FOUND)
+  set(HAVE_CRYPTO 1)
+  set(HAVE_COMMONCRYPTO 1)
+elseif (WINDOWS_CRYPTO_FOUND)
+  set(HAVE_CRYPTO 1)
+  set(HAVE_WINDOWS_CRYPTO 1)
+elseif (GNUTLS_FOUND AND NETTLE_FOUND)
+  set(HAVE_CRYPTO 1)
+  set(HAVE_GNUTLS 1)
+elseif (OPENSSL_FOUND)
+  set(HAVE_CRYPTO 1)
+  set(HAVE_OPENSSL 1)
+elseif (MBEDTLS_FOUND)
+  set(HAVE_CRYPTO 1)
+  set(HAVE_MBEDTLS 1)
+endif()
+
+if ((ENABLE_COMMONCRYPTO OR ENABLE_GNUTLS OR ENABLE_MBEDTLS OR ENABLE_OPENSSL OR ENABLE_WINDOWS_CRYPTO) AND NOT HAVE_CRYPTO)
+  message(WARNING "-- neither Common Crypto, GnuTLS, mbed TLS, OpenSSL, nor Windows Cryptography found; AES support disabled")
+endif()
+
+if(MSVC)
+  add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+  add_compile_definitions(_CRT_NONSTDC_NO_DEPRECATE)
+endif(MSVC)
+
+if(WIN32)
+  if(CMAKE_SYSTEM_NAME MATCHES WindowsPhone OR CMAKE_SYSTEM_NAME MATCHES WindowsStore)
+    add_compile_definitions(MS_UWP)
+  endif(CMAKE_SYSTEM_NAME MATCHES WindowsPhone OR CMAKE_SYSTEM_NAME MATCHES WindowsStore)
+endif(WIN32)
+
+# rpath handling: use rpath in installed binaries
+if(NOT CMAKE_SYSTEM_NAME MATCHES Linux)
+  set(CMAKE_INSTALL_RPATH ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR})
+  set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+endif()
+
+# for code completion frameworks
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Testing
+ENABLE_TESTING()
+
+# Targets
+ADD_SUBDIRECTORY(lib)
+
+if(BUILD_DOC)
+  ADD_SUBDIRECTORY(man)
+endif()
+
+if(BUILD_TOOLS)
+  ADD_SUBDIRECTORY(src)
+else(BUILD_TOOLS)
+  if(BUILD_REGRESS)
+    message(WARNING "-- tools build has been disabled, but they are needed for regression tests; regression testing disabled")
+    set(BUILD_REGRESS OFF)
+  endif(BUILD_REGRESS)
+endif()
+
+include(FindPerl)
+
+if(BUILD_REGRESS AND NOT PERL_FOUND)
+  message(WARNING "-- perl not found, regression testing disabled")
+  set(BUILD_REGRESS OFF)
+endif()
+
+if(BUILD_REGRESS)
+  add_subdirectory(regress)
 endif()
 
 if(BUILD_EXAMPLES)
-  set(EXAMPLE1_SRC_LIST "${CMAKE_CURRENT_SOURCE_DIR}/examples/example1.c")
-  set(EXAMPLE2_SRC_LIST "${CMAKE_CURRENT_SOURCE_DIR}/examples/example2.c")
-  set(EXAMPLE3_SRC_LIST "${CMAKE_CURRENT_SOURCE_DIR}/examples/example3.c")
-  set(EXAMPLE4_SRC_LIST "${CMAKE_CURRENT_SOURCE_DIR}/examples/example4.c")
-  set(EXAMPLE5_SRC_LIST "${CMAKE_CURRENT_SOURCE_DIR}/examples/example5.c")
-  set(EXAMPLE6_SRC_LIST "${CMAKE_CURRENT_SOURCE_DIR}/examples/example6.c")
-  set(MINIZ_TESTER_SRC_LIST
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/miniz_tester.cpp"
-      "${CMAKE_CURRENT_SOURCE_DIR}/tests/timer.cpp")
+  add_subdirectory(examples)
+endif()
 
-  add_executable(example1 ${EXAMPLE1_SRC_LIST})
-  target_link_libraries(example1 miniz)
-  add_executable(example2 ${EXAMPLE2_SRC_LIST})
-  target_link_libraries(example2 miniz)
-  add_executable(example3 ${EXAMPLE3_SRC_LIST})
-  target_link_libraries(example3 miniz)
-  add_executable(example4 ${EXAMPLE4_SRC_LIST})
-  target_link_libraries(example4 miniz)
-  add_executable(example5 ${EXAMPLE5_SRC_LIST})
-  target_link_libraries(example5 miniz)
-  add_executable(example6 ${EXAMPLE6_SRC_LIST})
-  target_link_libraries(example6 miniz)
-  if(${UNIX})
-      target_link_libraries(example6 m)
+
+# pkgconfig file
+file(RELATIVE_PATH pc_relative_bindir ${CMAKE_INSTALL_PREFIX} ${CMAKE_INSTALL_FULL_BINDIR})
+set(bindir "\${prefix}/${pc_relative_bindir}")
+file(RELATIVE_PATH pc_relative_libdir ${CMAKE_INSTALL_PREFIX} ${CMAKE_INSTALL_FULL_LIBDIR})
+set(libdir "\${prefix}/${pc_relative_libdir}")
+file(RELATIVE_PATH pc_relative_includedir ${CMAKE_INSTALL_PREFIX} ${CMAKE_INSTALL_FULL_INCLUDEDIR})
+set(includedir "\${prefix}/${pc_relative_includedir}")
+if(CMAKE_SYSTEM_NAME MATCHES BSD)
+  set(PKG_CONFIG_RPATH "-Wl,-R\${libdir}")
+endif(CMAKE_SYSTEM_NAME MATCHES BSD)
+get_target_property(LIBS_PRIVATE zip LINK_LIBRARIES)
+foreach(LIB ${LIBS_PRIVATE})
+  if(LIB MATCHES "^/")
+    get_filename_component(LIB ${LIB} NAME_WE)
+    string(REGEX REPLACE "^lib" "" LIB ${LIB})
   endif()
-
-  # add_executable(miniz_tester ${MINIZ_TESTER_SRC_LIST})
-  # target_link_libraries(miniz_tester miniz)
-endif(BUILD_EXAMPLES)
-
-if(BUILD_FUZZERS)
-  set(FUZZ_MAIN_SRC "${CMAKE_CURRENT_SOURCE_DIR}/tests/fuzz_main.c")
-
-  set(CHECKSUM_FUZZER_SRC_LIST "${FUZZ_MAIN_SRC}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/checksum_fuzzer.c")
-  set(FLUSH_FUZZER_SRC_LIST "${FUZZ_MAIN_SRC}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/flush_fuzzer.c")
-  set(UNCOMPRESS_FUZZER_SRC_LIST "${FUZZ_MAIN_SRC}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/uncompress_fuzzer.c")
-  set(UNCOMPRESS2_FUZZER_SRC_LIST "${FUZZ_MAIN_SRC}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/uncompress2_fuzzer.c")
-  set(COMPRESS_FUZZER_SRC_LIST "${FUZZ_MAIN_SRC}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/compress_fuzzer.c")
-  set(SMALL_FUZZER_SRC_LIST "${FUZZ_MAIN_SRC}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/small_fuzzer.c")
-  set(LARGE_FUZZER_SRC_LIST "${FUZZ_MAIN_SRC}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/large_fuzzer.c")
-  set(ZIP_FUZZER_SRC_LIST "${FUZZ_MAIN_SRC}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/zip_fuzzer.c")
-
-  add_executable(checksum_fuzzer ${CHECKSUM_FUZZER_SRC_LIST})
-  target_link_libraries(checksum_fuzzer miniz)
-
-  add_executable(flush_fuzzer ${FLUSH_FUZZER_SRC_LIST})
-  target_link_libraries(flush_fuzzer miniz)
-
-  add_executable(uncompress_fuzzer ${UNCOMPRESS_FUZZER_SRC_LIST})
-  target_link_libraries(uncompress_fuzzer miniz)
-
-  add_executable(uncompress2_fuzzer ${UNCOMPRESS2_FUZZER_SRC_LIST})
-  target_link_libraries(uncompress2_fuzzer miniz)
-
-  add_executable(compress_fuzzer ${COMPRESS_FUZZER_SRC_LIST})
-  target_link_libraries(compress_fuzzer miniz)
-
-  add_executable(small_fuzzer ${SMALL_FUZZER_SRC_LIST})
-  target_link_libraries(small_fuzzer miniz)
-
-  add_executable(large_fuzzer ${LARGE_FUZZER_SRC_LIST})
-  target_link_libraries(large_fuzzer miniz)
-
-  add_executable(zip_fuzzer ${ZIP_FUZZER_SRC_LIST})
-  target_link_libraries(zip_fuzzer miniz)
+  set(LIBS "${LIBS} -l${LIB}")
+endforeach()
+string(REGEX REPLACE "-lBZip2::BZip2" "-lbz2" LIBS ${LIBS})
+string(REGEX REPLACE "-lLibLZMA::LibLZMA" "-llzma" LIBS ${LIBS})
+string(REGEX REPLACE "-lZstd::Zstd" "-lzstd" LIBS ${LIBS})
+string(REGEX REPLACE "-lOpenSSL::Crypto" "-lssl -lcrypto" LIBS ${LIBS})
+string(REGEX REPLACE "-lZLIB::ZLIB" "-lz" LIBS ${LIBS})
+string(REGEX REPLACE "-lGnuTLS::GnuTLS" "-lgnutls" LIBS ${LIBS})
+string(REGEX REPLACE "-lNettle::Nettle" "-lnettle" LIBS ${LIBS})
+configure_file(libzip.pc.in libzip.pc @ONLY)
+if(LIBZIP_DO_INSTALL)
+  install(FILES ${PROJECT_BINARY_DIR}/libzip.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 endif()
 
-set(INCLUDE_INSTALL_DIR "include")
+# fixed size integral types
 
-if(INSTALL_PROJECT)
-  install(FILES ${INSTALL_HEADERS} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/${PROJECT_NAME})
+if(HAVE_INTTYPES_H_LIBZIP)
+  set(LIBZIP_TYPES_INCLUDE "#if !defined(__STDC_FORMAT_MACROS)
+#define __STDC_FORMAT_MACROS 1
+#endif
+#include <inttypes.h>")
+elseif(HAVE_STDINT_H_LIBZIP)
+  set(LIBZIP_TYPES_INCLUDE "#include <stdint.h>")
+elseif(HAVE_SYS_TYPES_H_LIBZIP)
+  set(LIBZIP_TYPES_INCLUDE "#include <sys/types.h>")
 endif()
 
+if(HAVE_INT8_T_LIBZIP)
+  set(ZIP_INT8_T int8_t)
+elseif(HAVE___INT8_LIBZIP)
+  set(ZIP_INT8_T __int8)
+else()
+  set(ZIP_INT8_T "signed char")
+endif()
+
+if(HAVE_UINT8_T_LIBZIP)
+  set(ZIP_UINT8_T uint8_t)
+elseif(HAVE___INT8_LIBZIP)
+  set(ZIP_UINT8_T "unsigned __int8")
+else()
+  set(ZIP_UINT8_T "unsigned char")
+endif()
+
+if(HAVE_INT16_T_LIBZIP)
+  set(ZIP_INT16_T int16_t)
+elseif(HAVE___INT16_LIBZIP)
+  set(INT16_T_LIBZIP __int16)
+elseif(SHORT_LIBZIP EQUAL 2)
+  set(INT16_T_LIBZIP short)
+endif()
+
+if(HAVE_UINT16_T_LIBZIP)
+  set(ZIP_UINT16_T uint16_t)
+elseif(HAVE___INT16_LIBZIP)
+  set(UINT16_T_LIBZIP "unsigned __int16")
+elseif(SHORT_LIBZIP EQUAL 2)
+  set(UINT16_T_LIBZIP "unsigned short")
+endif()
+
+if(HAVE_INT32_T_LIBZIP)
+  set(ZIP_INT32_T int32_t)
+elseif(HAVE___INT32_LIBZIP)
+  set(ZIP_INT32_T __int32)
+elseif(INT_LIBZIP EQUAL 4)
+  set(ZIP_INT32_T int)
+elseif(LONG_LIBZIP EQUAL 4)
+  set(ZIP_INT32_T long)
+endif()
+
+if(HAVE_UINT32_T_LIBZIP)
+  set(ZIP_UINT32_T uint32_t)
+elseif(HAVE___INT32_LIBZIP)
+  set(ZIP_UINT32_T "unsigned __int32")
+elseif(INT_LIBZIP EQUAL 4)
+  set(ZIP_UINT32_T "unsigned int")
+elseif(LONG_LIBZIP EQUAL 4)
+  set(ZIP_UINT32_T "unsigned long")
+endif()
+
+if(HAVE_INT64_T_LIBZIP)
+  set(ZIP_INT64_T int64_t)
+elseif(HAVE___INT64_LIBZIP)
+  set(ZIP_INT64_T __int64)
+elseif(LONG_LIBZIP EQUAL 8)
+  set(ZIP_INT64_T long)
+elseif(LONG_LONG_LIBZIP EQUAL 8)
+  set(ZIP_INT64_T "long long")
+endif()
+
+if(HAVE_UINT64_T_LIBZIP)
+  set(ZIP_UINT64_T uint64_t)
+elseif(HAVE___INT64_LIBZIP)
+  set(ZIP_UINT64_T "unsigned __int64")
+elseif(LONG_LIBZIP EQUAL 8)
+  set(ZIP_UINT64_T "unsigned long")
+elseif(LONG_LONG_LIBZIP EQUAL 8)
+  set(ZIP_UINT64_T "unsigned long long")
+endif()
+
+if(HAVE_NULLABLE)
+  set(ZIP_NULLABLE_DEFINES)
+else()
+  set(ZIP_NULLABLE_DEFINES "#define _Nullable
+#define _Nonnull")
+endif()
+
+# write out config file
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake-config.h.in ${PROJECT_BINARY_DIR}/config.h)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake-zipconf.h.in ${PROJECT_BINARY_DIR}/zipconf.h)
+
+# for tests
+
+set(srcdir ${CMAKE_CURRENT_SOURCE_DIR}/regress)
+set(abs_srcdir ${CMAKE_CURRENT_SOURCE_DIR}/regress)
+set(top_builddir ${PROJECT_BINARY_DIR}) # used to find config.h
+
+configure_file(regress/nihtest.conf.in ${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/nihtest.conf @ONLY)
+file(COPY ${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/nihtest.conf
+  DESTINATION ${PROJECT_BINARY_DIR}/regress
+  FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+
+configure_file(regress/runtest.in ${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/runtest @ONLY)
+file(COPY ${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/runtest
+  DESTINATION ${PROJECT_BINARY_DIR}/regress
+  FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
+  )
+
+# create package config file
+include(CMakePackageConfigHelpers)
+write_basic_package_version_file("${PROJECT_BINARY_DIR}/${PROJECT_NAME}-config-version.cmake"
+  COMPATIBILITY AnyNewerVersion)
+
+configure_package_config_file("${PROJECT_NAME}-config.cmake.in" "${PROJECT_BINARY_DIR}/${PROJECT_NAME}-config.cmake"
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/libzip)
+
+if(LIBZIP_DO_INSTALL)
+  # Add targets to the build-tree export set
+  export(TARGETS zip
+    FILE "${PROJECT_BINARY_DIR}/${PROJECT_NAME}-targets.cmake")
+
+  # installation
+  install(FILES ${PROJECT_BINARY_DIR}/zipconf.h DESTINATION include)
+  install(FILES ${PROJECT_BINARY_DIR}/${PROJECT_NAME}-config.cmake ${PROJECT_BINARY_DIR}/${PROJECT_NAME}-config-version.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
+    )
+  install(EXPORT ${PROJECT_NAME}-targets NAMESPACE libzip:: FILE ${PROJECT_NAME}-targets.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}
+    )
+endif()
